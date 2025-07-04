@@ -1,0 +1,2 @@
+plexapi>=4.13.0
+requests>=2.25.0
