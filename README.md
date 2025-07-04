@@ -1,21 +1,30 @@
-# Plex Artwork Healer
+# 🖼️ Plex Artwork Healer
 
-A powerful script that scans your Plex libraries and collections for missing or broken posters and backgrounds, and automatically restores or re-downloads them.
+A powerful self-healing script for Plex that ensures your Movies, TV Shows, and Collections never appear with broken or missing posters or backgrounds.
 
 ---
 
-## 🔧 Features
+## ❓ Why I Created This Script
 
-* ✅ Detects broken or missing posters and backgrounds
-* 📂 Restores from local backup if available
-* 🌐 Downloads from TMDb as a fallback (requires API key)
-* 📄 Optionally uploads fixed artwork back to Plex
-* 📁 Automatically creates folder structure for backups
-* 🚜 Supports Movies, TV Shows, and Collections
+Many users experience missing posters or backgrounds in Plex — either due to agent failures, server restarts, or cache corruption. This script was designed to **automatically detect broken or missing artwork**, try restoring it from **local backups**, and if needed, **fetch replacements from TMDb**. It can even **re-upload** these images to Plex — completely unattended.
+
+---
+
+## ✅ Features
+
+- 🧠 Detects broken or missing posters and backgrounds
+- 💾 Restores from local backup if available (`Posters/...`)
+- 🌍 Downloads from TMDb (requires free API key)
+- 🔁 Optionally re-uploads posters/backgrounds to Plex
+- 🗂️ Automatically creates folders for missing backup files
+- 🎬 Supports Movies, TV Shows, and Collections
+- 📝 Dry-run support with detailed logging
 
 ---
 
 ## 📁 Folder Structure
+
+Expected structure for backups:
 
 ```bash
 Posters/
@@ -29,19 +38,38 @@ Posters/
         └── background.jpg
 ```
 
+If artwork is missing in Plex and a local backup exists, it will be restored from this structure.
+
 ---
 
-## ✨ Getting Started
+## ⚙️ Requirements
 
-### 1. Install Requirements
+- Python 3.x
+- [`plexapi`](https://pypi.org/project/plexapi/)
+- [`requests`](https://pypi.org/project/requests/)
+
+Install via pip:
 
 ```bash
 pip install plexapi requests
 ```
 
-### 2. Set Configuration
+---
 
-Edit the script with your Plex and TMDb info:
+## 🔑 TMDb API Key
+
+To fetch posters and backdrops from TMDb:
+
+1. Visit: https://www.themoviedb.org/settings/api
+2. Create a (free) TMDb account if needed
+3. Generate a **Developer API Key** (v3)
+4. Use it in the config section of the script
+
+---
+
+## 🔧 Configuration
+
+Edit `plex_artwork_healer.py`:
 
 ```python
 PLEX_URL = 'http://your-plex-ip:32400'
@@ -49,30 +77,56 @@ PLEX_TOKEN = 'your_plex_token'
 TMDB_API_KEY = 'your_tmdb_api_key'
 ```
 
-Optional config:
+Optional flags:
 
-* `ENABLE_UPLOAD = True` to enable fixing artwork
-* `DRY_RUN = True` to preview actions without uploading
+```python
+ENABLE_UPLOAD = True   # Enables uploading images to Plex
+DRY_RUN = True         # Preview changes without making edits
+```
 
 ---
 
-## 🛠 Usage
+## ▶️ Usage
+
+Run the script:
 
 ```bash
 python plex_artwork_healer.py
 ```
 
-* First run it with `DRY_RUN = True` to safely test
-* Review `artwork_healer.log`
-* Then run with `DRY_RUN = False` to apply changes
+🟢 Start with `DRY_RUN = True`  
+🟢 Inspect `artwork_healer.log`  
+🟢 When confident, set `DRY_RUN = False` to apply
 
 ---
 
-## 📌 Notes
+## 🗒️ Tips & Notes
 
-* Only uses official Plex and TMDb APIs
-* Does not overwrite existing good artwork
-* Can be scheduled via cron or Task Scheduler for auto-healing
+- Only affects items with broken or missing artwork
+- Will not overwrite working posters or backdrops
+- Local backups take priority over TMDb
+- Can be run on a schedule (e.g., via cron or Task Scheduler)
 
 ---
+
+## 📂 Logging
+
+All actions are logged to:
+
+```
+artwork_healer.log
+```
+
+This includes:
+- Items scanned
+- Posters restored or skipped
+- TMDb lookups
+- Uploads to Plex
+
+---
+
+## ⚠️ Disclaimer
+
+Use at your own risk. Always review logs before enabling upload mode.  
+Not affiliated with Plex, TMDb, or any third-party services.
 
