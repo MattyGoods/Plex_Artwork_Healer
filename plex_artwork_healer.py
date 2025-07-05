@@ -1,171 +1,239 @@
+# === IMPORTS ===
 import os
-import requests
-import datetime
-import time
 import re
+import time
+import csv
+import datetime
+import requests
 from plexapi.server import PlexServer
+from tmdbv3api import TMDb, Movie
 
-# === Configuration ===
-PLEX_URL = 'http://localhost:32400'                 # Your Plex server URL or IP
-PLEX_TOKEN = 'YOUR_PLEX_TOKEN_HERE'                 # Your Plex authentication token
-TMDB_API_KEY = 'YOUR_TMDB_API_KEY_HERE'             # TMDb API key
-LIBRARIES = ['Movies', 'TV Shows']                  # Plex library names to process
-BASE_DIR = 'Posters'                                # Local folder to store or load backup images
-ENABLE_UPLOAD = False                               # If True, script will upload fixed artwork to Plex
-DRY_RUN = False                                     # If True, simulate actions without performing them
-ENABLE_LOG = True                                   # Enable logging to file
-LOG_FILE = 'artwork_healer.log'                     # Log file name
-DELAY = 1                                           # Delay between operations (in seconds)
-TMDB_LANG = 'en-US'                                 # Language used when querying TMDb
+# === CONFIGURATION ===
+PLEX_URL = 'http://<PLEX_IP>:32400'        # Plex server base URL
+PLEX_TOKEN = 'PLEX_TOKEN'                  # Plex API token
+TMDB_API_KEY = 'TMDB API'                  # TMDb API key
 
-HEADERS = {"Accept": "application/json"}            # Common headers for TMDb API calls
+LIBRARIES = ['Movies', 'TV Shows']         # Plex libraries to process
+BASE_DIR = 'Posters'                       # Directory to store artwork backups
+LOG_FILE = 'artwork_healer.log'            # Output log file
+CACHE_FILE = 'tmdb_cache.csv'              # TMDb ID cache CSV file
 
-# --- Utility Functions ---
+ENABLE_UPLOAD = True                       # Whether to upload artwork to Plex
+FORCE_UPLOAD_ALL = False                   # If True, re-upload even working images
+DRY_RUN = False                            # If True, don't make changes
+ENABLE_LOG = True                          # If True, write to log file
+DELAY = 1                                  # Delay (in seconds) between items
 
-def log(message):
-    """Log a message to the console and optionally to a file."""
-    print(message)
+# === TMDb SETUP ===
+tmdb = TMDb()
+tmdb.api_key = TMDB_API_KEY
+tmdb.language = 'en'
+movie_search = Movie()                     # TMDb movie search instance
+
+# === LOGGING UTILITY ===
+def log(msg):
+    """Prints and logs messages with timestamp"""
+    print(msg)
     if ENABLE_LOG:
         with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"{datetime.datetime.now()} - {message}\n")
+            f.write(f"{datetime.datetime.now()} - {msg}\n")
 
+# === FILE SYSTEM HELPERS ===
 def safe_filename(name):
-    """Sanitize a filename to remove characters invalid for file/folder names."""
+    """Cleans a string to make it a safe filename"""
     return re.sub(r'[\\/*?:"<>|]', "", name)
 
-def check_poster_url(poster_url):
-    """Check if the provided Plex artwork URL is broken (e.g. 404 or timeout)."""
+def ensure_folder(path):
+    """Creates directory if it doesn't exist"""
+    os.makedirs(path, exist_ok=True)
+
+def artwork_url_invalid(url):
+    """Checks if a given artwork URL is invalid or unreachable"""
     try:
-        r = requests.get(poster_url, timeout=5)
+        r = requests.get(url, timeout=5)
         return r.status_code != 200
     except:
         return True
 
-def restore_from_backup(library_name, title, art_type):
-    """Check if a local backup of the poster or background exists and return its path if found."""
-    file_name = f"{art_type}.jpg"
-    item_dir = os.path.join(BASE_DIR, library_name, safe_filename(title))
-    backup_path = os.path.join(item_dir, file_name)
-    return backup_path if os.path.exists(backup_path) else None
+def get_artwork_path(library, title, art_type):
+    """Returns full path to the local poster or background image file"""
+    return os.path.join(BASE_DIR, library, safe_filename(title), f"{art_type}.jpg")
 
-def search_tmdb(title, content_type):
-    """Search TMDb for the given title (either 'movie' or 'tv') and return the first result."""
+def extract_tmdb_id_from_guid(guid):
+    """Extracts TMDb ID from a Plex GUID string (if available)"""
+    match = re.search(r'themoviedb://(\d+)', guid or '')
+    return int(match.group(1)) if match else None
+
+# === ARTWORK BACKUP / DOWNLOAD / UPLOAD ===
+def backup_from_plex(item, art_type, path):
+    """Downloads and saves poster or background from Plex"""
+    rel_url = item.thumb if art_type == 'poster' else item.art
+    if not rel_url:
+        return False
     try:
-        search_type = 'movie' if content_type == 'movie' else 'tv'
-        url = f"https://api.themoviedb.org/3/search/{search_type}"
-        params = {
-            'api_key': TMDB_API_KEY,
-            'language': TMDB_LANG,
-            'query': title
-        }
-        r = requests.get(url, headers=HEADERS, params=params, timeout=10)
-        data = r.json()
-        return data['results'][0] if data.get('results') else None
+        url = f"{PLEX_URL}{rel_url}?X-Plex-Token={PLEX_TOKEN}"
+        r = requests.get(url)
+        if r.status_code == 200:
+            with open(path, 'wb') as f:
+                f.write(r.content)
+            log(f"[BACKUP] Saved {art_type} for {item.title} from Plex")
+            return True
     except Exception as e:
-        log(f"[TMDb] Search failed for {title}: {e}")
-        return None
+        log(f"[ERROR] Failed backup for {item.title} ({art_type}): {e}")
+    return False
 
-def download_tmdb_image(tmdb_data, art_type):
-    """Download a poster or backdrop image from TMDb and return it as binary data."""
+def download_tmdb_art(tmdb_data, art_type, path):
+    """Downloads poster or backdrop from TMDb"""
+    key = 'poster_path' if art_type == 'poster' else 'backdrop_path'
+    art_path = getattr(tmdb_data, key, None)
+    if not art_path:
+        return False
+    url = f"https://image.tmdb.org/t/p/original{art_path}"
     try:
-        key = 'poster_path' if art_type == 'poster' else 'backdrop_path'
-        if not tmdb_data.get(key):
-            return None
-        image_url = f"https://image.tmdb.org/t/p/original{tmdb_data[key]}"
-        r = requests.get(image_url, timeout=10)
-        return r.content if r.status_code == 200 else None
+        r = requests.get(url)
+        if r.status_code == 200:
+            with open(path, 'wb') as f:
+                f.write(r.content)
+            log(f"[TMDb] Downloaded {art_type} for {tmdb_data.title}")
+            return True
     except Exception as e:
-        log(f"[TMDb] Failed to download {art_type}: {e}")
-        return None
+        log(f"[ERROR] Failed TMDb download for {tmdb_data.title} ({art_type}): {e}")
+    return False
 
-# --- Core Logic ---
-
-def fix_art(item, title, library_name, art_type, tmdb_type=None):
-    """
-    Attempt to fix missing/broken artwork for an item by:
-    1. Checking Plex for broken poster/art.
-    2. Trying to restore from local backup.
-    3. Falling back to TMDb to redownload.
-    4. Optionally uploading the image to Plex.
-    """
+def upload_to_plex(item, art_type, path):
+    """Uploads poster or background to Plex"""
     try:
-        item_dir = os.path.join(BASE_DIR, library_name, safe_filename(title))
-        os.makedirs(item_dir, exist_ok=True)
-
-        # Determine the correct artwork field
-        rel_url = getattr(item, 'thumb' if art_type == 'poster' else 'art', None)
-        is_broken = not rel_url or check_poster_url(f"{PLEX_URL}{rel_url}?X-Plex-Token={PLEX_TOKEN}")
-
-        if not is_broken:
-            log(f"[OK] {title} {art_type} is fine.")
-            return
-
-        log(f"[FIX] {title} missing/broken {art_type}")
-
-        # Step 1: Try restoring from local backup
-        backup_path = restore_from_backup(library_name, title, art_type)
-        if backup_path:
-            log(f"[RESTORE] Using backup {backup_path}")
-            if ENABLE_UPLOAD and not DRY_RUN:
-                with open(backup_path, 'rb') as f:
-                    item.uploadPoster(f) if art_type == 'poster' else item.uploadArt(f)
-            return
-
-        # Step 2: Try downloading from TMDb
-        if tmdb_type:
-            tmdb_data = search_tmdb(title, tmdb_type)
-            if tmdb_data:
-                img = download_tmdb_image(tmdb_data, art_type)
-                if img:
-                    log(f"[TMDb] Downloaded {art_type} for {title} from TMDb")
-                    if ENABLE_UPLOAD and not DRY_RUN:
-                        from io import BytesIO
-                        stream = BytesIO(img)
-                        item.uploadPoster(stream) if art_type == 'poster' else item.uploadArt(stream)
-                    return
-
-        # If all fails
-        log(f"[MISSING] No {art_type} available for {title}")
+        if art_type == 'poster':
+            item.uploadPoster(filepath=path)
+        else:
+            item.uploadArt(filepath=path)
+        log(f"[UPLOAD] Uploaded {art_type} for {item.title}")
     except Exception as e:
-        log(f"[ERROR] {title} {art_type}: {e}")
+        log(f"[ERROR] Upload failed for {item.title} ({art_type}): {e}")
 
-def process_items(library_name, items, tmdb_type=None):
-    """Iterate over Plex items and run fix_art for both poster and background."""
-    for item in items:
-        title = item.title
-        fix_art(item, title, library_name, 'poster', tmdb_type)
-        fix_art(item, title, library_name, 'background', tmdb_type)
+# === TMDb ID CACHING ===
+def build_tmdb_cache(plex):
+    """Builds TMDb ID cache from all libraries + movie collections"""
+    cache = {}
+    log("[CACHE] Generating new TMDb cache...")
+
+    for lib in LIBRARIES:
+        try:
+            section = plex.library.section(lib)
+            for item in section.all():
+                guid = getattr(item, 'guid', '')
+                tmdb_id = extract_tmdb_id_from_guid(guid)
+                if tmdb_id:
+                    cache[item.title] = tmdb_id
+        except Exception as e:
+            log(f"[ERROR] Failed to cache {lib}: {e}")
+
+    # Also try caching Collections under "Movies"
+    try:
+        movies_section = plex.library.section('Movies')
+        for coll in movies_section.collections():
+            guid = getattr(coll, 'guid', '')
+            tmdb_id = extract_tmdb_id_from_guid(guid)
+            if tmdb_id:
+                cache[coll.title] = tmdb_id
+    except Exception as e:
+        log(f"[ERROR] Failed to cache collections: {e}")
+
+    # Write cache to CSV
+    with open(CACHE_FILE, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(['title', 'tmdb_id'])
+        for title, tmdb_id in cache.items():
+            writer.writerow([title, tmdb_id])
+    log(f"[CACHE] Saved TMDb ID cache to {CACHE_FILE}")
+    return cache
+
+def load_tmdb_cache():
+    """Loads TMDb cache from CSV file"""
+    cache = {}
+    if not os.path.exists(CACHE_FILE):
+        return cache
+    with open(CACHE_FILE, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row['title'] and row['tmdb_id'].isdigit():
+                cache[row['title']] = int(row['tmdb_id'])
+    return cache
+
+# === MAIN FUNCTION TO FIX POSTER OR BACKGROUND ===
+def fix_art(item, library, art_type, cache):
+    title = item.title
+    rel_url = item.thumb if art_type == 'poster' else item.art
+    broken = FORCE_UPLOAD_ALL or not rel_url or artwork_url_invalid(f"{PLEX_URL}{rel_url}?X-Plex-Token={PLEX_TOKEN}")
+    backup_path = get_artwork_path(library, title, art_type)
+    ensure_folder(os.path.dirname(backup_path))
+
+    # Step 1: Backup if not already done
+    if not os.path.exists(backup_path):
+        backup_from_plex(item, art_type, backup_path)
+
+    # Step 2: Skip if not broken and not forcing
+    if not broken:
+        log(f"[OK] {title} {art_type} is fine.")
+        return
+
+    log(f"[{'FORCE' if FORCE_UPLOAD_ALL else 'FIX'}] Redownloading {art_type} for {title}")
+
+    # Step 3: Restore from local backup
+    if os.path.exists(backup_path) and not FORCE_UPLOAD_ALL:
+        log(f"[RESTORE] Found local {art_type} for {title}")
+        if ENABLE_UPLOAD and not DRY_RUN:
+            upload_to_plex(item, art_type, backup_path)
+        return
+
+    # Step 4: TMDb Lookup from cache or search
+    tmdb_id = cache.get(title)
+    tmdb_data = None
+    if tmdb_id:
+        try:
+            tmdb_data = movie_search.details(tmdb_id)
+        except Exception as e:
+            log(f"[ERROR] TMDb lookup failed for {title} (ID {tmdb_id}): {e}")
+    else:
+        try:
+            results = movie_search.search(title)
+            tmdb_data = results[0] if results else None
+        except Exception as e:
+            log(f"[ERROR] TMDb search failed for {title}: {e}")
+
+    # Step 5: Download and Upload artwork
+    if tmdb_data and download_tmdb_art(tmdb_data, art_type, backup_path):
+        if ENABLE_UPLOAD and not DRY_RUN:
+            upload_to_plex(item, art_type, backup_path)
+    else:
+        log(f"[MISSING] No {art_type} found for {title}")
+
+def process_section(section, library, cache):
+    """Processes all items in a Plex library section"""
+    for item in section.all():
+        fix_art(item, library, 'poster', cache)
+        fix_art(item, library, 'background', cache)
         time.sleep(DELAY)
 
+# === MAIN ENTRY POINT ===
 def main():
-    """Main script execution."""
     if ENABLE_LOG:
         with open(LOG_FILE, 'w', encoding='utf-8') as f:
             f.write("=== Plex Artwork Healer Log ===\n")
 
-    # Connect to Plex server
     plex = PlexServer(PLEX_URL, PLEX_TOKEN)
 
-    # Process all specified libraries
-    for library_name in LIBRARIES:
+    # Step 1: Generate ID Cache
+    cache = build_tmdb_cache(plex)
+
+    # Step 2: Process all libraries
+    for lib in LIBRARIES:
         try:
-            section = plex.library.section(library_name)
-            content_type = 'movie' if section.type == 'movie' else 'tv'
-            log(f"\n=== Processing {library_name} ===")
-            process_items(library_name, section.all(), content_type)
+            log(f"\n=== Processing Library: {lib} ===")
+            section = plex.library.section(lib)
+            process_section(section, lib, cache)
         except Exception as e:
-            log(f"[ERROR] Failed library {library_name}: {e}")
+            log(f"[ERROR] Failed processing {lib}: {e}")
 
-    # Process collections in each library
-    try:
-        log(f"\n=== Processing Collections ===")
-        for library_name in LIBRARIES:
-            section = plex.library.section(library_name)
-            collections = section.collections()
-            process_items(library_name, collections)
-    except Exception as e:
-        log(f"[ERROR] Failed to process collections: {e}")
-
-# --- Entry point ---
 if __name__ == '__main__':
     main()
